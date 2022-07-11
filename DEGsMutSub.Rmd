@@ -1,5 +1,5 @@
 ---
-title: "MutSub DEGs of GABA mutants"
+title: "MutSub DEGs of GABA mutants after submergence"
 author: "Ying"
 output: html_document
 editor_options: 
@@ -10,4 +10,165 @@ editor_options:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+```{r load libraries}
+library(tidyverse)
+library(magrittr)
+library(edgeR)
+library(ComplexHeatmap) # for UpSet Plot
+```
 
+```{r model fitting and contrast making}
+# load objects from AtDGEsConSub.RData
+countList <- readRDS("../ArabidopsisRNAseq_Submergence/_R/countList.rds")
+counts_Disp <- readRDS("../ArabidopsisRNAseq_Submergence/_R/counts_Disp.rds")
+
+# construct a design matrix with no ref group
+designMat <- model.matrix(~ 0 + group, data = countList$samples)
+colnames(designMat) <- levels(countList$samples$group)
+# fit to model
+fit <- glmQLFit(counts_Disp, design = designMat)
+
+# make contrasts 
+myContrast <- makeContrasts(   # mutation-specific submerge responses (×6)
+  gad1CS = (gad1CS_sub - Col_sub)- (gad1CS_cont - Col_cont), 
+  gad1SALK = (gad1SALK_sub - Col_sub) - (gad1SALK_cont - Col_cont),
+  gad21 = (gad21_sub - Col_sub) - (gad21_cont - Col_cont), 
+  gad1245 = (gad1245_sub - Col_sub) - (gad1245_cont - Col_cont),
+  gad2OEB33 = (gad2OEB33_sub - Col_sub) - (gad2OEB33_cont - Col_cont), 
+  pop28 = (pop28_sub - Col_sub) - (pop28_cont - Col_cont),
+  levels = designMat)
+
+```
+
+```{r DE genes}
+# a list of 6 pairs of comparisons ------- #
+DEGs <- lapply(colnames(myContrast), function(c){
+  qlf <- glmQLFTest(fit, contrast = myContrast[,c])
+  qlf$table %>% rownames_to_column("GeneID") %>% 
+    mutate(adj.p = p.adjust(PValue, method = "BH"),
+           comparison = c)
+}) 
+names(DEGs) <- colnames(myContrast)
+
+# count up/down regulated genes, before filtering ------- # 
+countDEGs <- lapply(colnames(myContrast), function(i){
+  qlf <- glmQLFTest(fit, contrast = myContrast[,i])
+  df <- as.data.frame(summary(decideTests(qlf))) %>% column_to_rownames("Var1") %>% t()
+  df <- as.data.frame(df) %>% mutate(Mutant = i) 
+  df[2,]
+}) %>% 
+  bind_rows() %>% 
+  dplyr::select(c(Mutant, Up, Down, NotSig)) %>% 
+  mutate(Total = as.numeric(Up) + as.numeric(Down) + as.numeric(NotSig))
+
+# volcano plot for all genes: 3 by 2 facetwrap
+lapply(names(DEGs), function(g){  # g: genotype_WT, the comparison
+  DEGs[[g]] %>% dplyr::select(logFC, adj.p, comparison) %>% 
+    mutate(Expr = ifelse(adj.p < 0.05 & abs(logFC) >=1, 
+                         ifelse(logFC > 1, "Up", "Down"),
+                         "NotSig"))}) %>% bind_rows() %>% as.data.frame() %>% 
+  rstatix::reorder_levels("comparison", order = names(DEGs)) %>% 
+    ggplot(aes(x = logFC,
+               y = -log10(adj.p),
+               colour = ordered(Expr, 
+                                levels = c("Up", "Down", "NotSig"))))+
+    geom_point(alpha = 0.2, size = 3, shape=20) +
+    scale_color_manual(values = c("red", "blue", "grey")) +
+    geom_vline(xintercept = c(-1, 1),
+               lty = 4, colour = "#4a452a", lwd = 0.4) +
+    geom_hline(yintercept = -log10(0.05),
+               lty = 4, colour = "#4a452a", lwd = 0.4) +
+    labs(x = "log2 (fold change)",
+         y = "- log10 (adjust.p-value)") +
+    theme_bw() +
+    theme(legend.position = c(0.41,0.92),
+          legend.title = element_blank()) +
+  facet_wrap(vars(comparison), nrow = 4, scales = "fixed")
+
+```
+
+```{r DE genes for go analysis}
+DEGs2go <- lapply(names(DEGs), function(g){
+  DEGs[[g]] %>% 
+    filter(adj.p < 0.05 & abs(logFC) > 1) %>% 
+    mutate(Expr = ifelse(logFC > 1, "Up", "Down"))
+}) 
+names(DEGs2go) <- names(DEGs)
+
+# count up/down regulated genes after filtering
+countDEGs2go <- lapply(names(DEGs2go), function(g){
+  Up = as.numeric(sum(DEGs2go[[g]]$Expr == "Up"))
+  Down = as.numeric(sum(DEGs2go[[g]]$Expr == "Down"))
+  Total = Up+Down
+  Mutant = g
+  df <- data.frame(Mutant, Up, Down, Total)
+}) %>% 
+  bind_rows()
+write.csv(countDEGs2go, "countDEGs2go_MutSub.csv")
+```
+
+```{UpSet plot for DEGs}
+# get gene list of filterd DEGs (from DEGs2go)
+geneList <- lapply(names(DEGs2go),function(g){
+  DEGs2go[[g]]$GeneID
+  }) 
+names(geneList) <- names(DEGs2go)
+
+length(geneList %>% unlist() %>% unique())  # in total 5878 (default filtering)
+
+#
+# upset plot ------
+m <- make_comb_mat(geneList)  # input data: 2 sets of DEGs
+m <- m[comb_size(m) > 10] # only present intersections with more than 10 DE genes
+
+ss <- set_size(m)
+cs <- comb_size(m)
+od = order(comb_degree(m),-cs)
+
+UpSet(m, 
+      pt_size = unit(2, "mm"),
+      lwd = 1, 
+      set_order = order(ss),
+      comb_order = od,
+      comb_col = "Purple",
+      
+      top_annotation = HeatmapAnnotation(
+        "DEGs Intersections" =  
+          anno_barplot(cs,
+                       ylim = c(0, max(cs)*1.1),
+                       border = FALSE, 
+                       gp = gpar(fill = "#4a452a"), 
+                       height = unit(5, "cm")
+                       ),
+        annotation_name_side = "left",
+        annotation_name_rot = 90),
+      
+      right_annotation = rowAnnotation(
+        "No. of DEGs" = 
+          anno_barplot(ss, 
+                       baseline = 500,
+                       axis_param = list(
+                         at = c(500, 2000, 4000), 
+                         side = "top",
+                         labels = c(500, 2000, 4000), 
+                         labels_rot = 45),
+                       border = FALSE, 
+                       gp = gpar(fill = "#4a452a"), 
+                       width = unit(3, "cm")),
+        annotation_name_side = "top",
+        annotation_name_rot = 0),
+      
+      row_names_side = "left",
+      show_row_names = TRUE,
+      row_names_gp = grid::gpar(fontsize = 10)) 
+
+decorate_annotation("DEGs Intersections", {
+    grid.text(cs[od], x = seq_along(cs), y = unit(cs[od], "native") + unit(3, "pt"), 
+        default.units = "native", just = c("left", "bottom"), 
+        gp = gpar(fontsize = 7.5, col = "#4a452a"), rot = 60)
+})
+```
+
+```{r save DEGs2go to _R directory}
+DEGs2go %>% saveRDS(file.path("_R", "DEGsMutSub.rds"))
+```
