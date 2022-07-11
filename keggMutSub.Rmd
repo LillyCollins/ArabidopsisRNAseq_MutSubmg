@@ -1,0 +1,20 @@
+---
+title: "KEGG pathway analysis of mutation-specific submergence response in GABA mutants"
+author: "Ying"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+
+
+
+
+

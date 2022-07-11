@@ -1,0 +1,125 @@
+---
+title: "GO enrichment analysis of mutation-specific submergence response in GABA mutants"
+author: "Ying"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load libraries}
+library(tidyverse)
+library(magrittr)
+library(GO.db)
+library(pheatmap)
+# library(ggVennDiagram)
+
+## for Mac only
+nCores <- min(parallel::detectCores() - 1, 12)
+# nCores = 1 # for windows
+```
+
+```{r GO enrichment analysis using DEGsMutSub}
+# attach DE genes and go2GENE and goSummaries
+DEGsMutSub <- readRDS("_R/DEGsMutSub.rds")
+gene2GO <- readRDS("../ArabidopsisRNAseq_Control/_R/gene2GO.rds")
+goSummaries <- 
+  url("https://uofabioinformaticshub.github.io/summaries2GO/data/goSummaries.RDS") %>% 
+  readRDS()
+
+# check how many DE genes have GO terms
+DEGsMutSub %>% 
+  lapply(function(de){
+    tibble(n.de = length(de$GeneID),
+           n.deWithGO = intersect(de$GeneID, names(DEGsMutSub)) %>% length())
+  })
+
+# GO enrichment: Up-/Down- DE genes separated  
+goRes <- DEGsMutSub %>%   # all 5878 DE genes in DEGs2go
+  lapply(function(x){   # x: 6 MutantVsWt comparisions
+    x %>% 
+      split(f = .$Expr) %>% 
+      lapply(function(y){   # y: Expr Up or Down
+        DEgenes <- y$GeneID %>% 
+          intersect(names(gene2GO)) # remove DEgenes that have no GO terms
+        deGenes2GO <- gene2GO[DEgenes]
+        notDEGenes2GO <- gene2GO[setdiff(names(gene2GO), DEgenes)]
+        # genome-wide protein coding gene except genes in the DEgenes as background
+        nDE <- length(deGenes2GO) # number of DE genes that has GO terms
+        nNotDE <- length(notDEGenes2GO)
+        
+        NotdeGO <- unlist(notDEGenes2GO) %>% 
+          table %>%  
+          as.data.frame() %>% 
+          set_names(c("GO_term", "notDECount"))
+        
+        deGO <- unlist(deGenes2GO) %>% 
+          table() %>% 
+          as.data.frame() %>% 
+          set_names(c("GO_term", "DECount")) %>% 
+          left_join(NotdeGO, by = "GO_term") %>% 
+          as_tibble() %>% 
+          filter(DECount > 1) %>%  # only consider go terms with >=2 DEgenes
+          mutate(notDECount = ifelse(is.na(notDECount), 0 , notDECount)) %>% 
+          # remove NAs in notDECount cells after left_join
+          arrange(GO_term) %>% 
+          droplevels()
+        
+        deGO %>% 
+          split(f = .$GO_term) %>% 
+          lapply(function(df){    # for a given GO term, do the following stats
+            mat <- 
+              matrix(c(df$DECount[1], # get element in the 1st row of both columns
+                       df$notDECount[1], nDE - df$DECount[1], nNotDE - df$notDECount),
+                     nrow = 2) %>% 
+              set_colnames(c("Genes with GO term", "Genes without GO term")) %>% 
+              set_rownames(c("DE genes", "Control genes"))
+            ft <- fisher.test(mat)
+            mutate(df,
+                   N = sum(mat[, "Genes with GO term"]), # how many genes in that GO
+                   Expect = nDE * df$notDECount[1] / nNotDE,
+                   DEGsRatio =  paste0(DECount, "/", N), # DE genes / all genes in that GO
+                   GeneRatio = paste0(DECount, "/", nDE),
+                   # DE genes among all DEGs (that has a GO term) in WT/Mutant 
+                   BgRatio = paste0(notDECount, "/", nNotDE),
+                   p = ft$p.value)
+          }) %>% 
+          bind_rows() %>% 
+          mutate(adjP =p.adjust(p, "bonferroni"),
+                 FDR = p.adjust(p, "fdr"),
+                 Descrip = Term(as.character(GO_term)),
+                 Expr = unique(y$Expr)) %>% 
+          arrange(p) %>% 
+          left_join(goSummaries, by = c("GO_term" = "id")) %>% 
+          filter(DECount > Expect) %>% # because fisher.test is two-sided
+          dplyr::select(GO_term, Descrip, DECount, Expect, N, everything())
+      }) %>% 
+      bind_rows()
+  })
+
+goRes  <- names(goRes) %>%  
+  lapply(function(x){     # x is each one of the 6 MutantVsWt comparisons
+    goRes[[x]] %>% 
+      mutate(Group = x) %>% 
+      dplyr::select(-notDECount)
+  }) %>% 
+  bind_rows() %>% 
+  split(.$Expr)
+
+write_csv(goRes[["Up"]], "_Results/GoUpResults_MutSub.csv")
+write_csv(goRes[["Down"]], "_Results/GoDownResults_MutSub.csv")
+
+```
+
+
+
+
+
+
+
+
+
+
